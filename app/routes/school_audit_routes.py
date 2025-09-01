@@ -625,9 +625,11 @@ def get_audit_summary(user_email):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+# Replace your export_audits_excel function with this enhanced version
+
 @school_audit_bp.route('/export-audits', methods=['POST'])
 def export_audits_excel():
-    """Export audit data to Excel with enhanced session data"""
+    """Export audit data to Excel with ALL image URLs included"""
     try:
         data = request.get_json()
         start_date = data.get('start_date')
@@ -702,14 +704,28 @@ def export_audits_excel():
         # Create main worksheet
         worksheet = workbook.add_worksheet("School Audits")
 
-        # Enhanced headers with session data
+        # ENHANCED headers with ALL image URLs
         headers = [
             'Audit ID', 'Date', 'Auditor Email', 'School Name', 'City', 'Latitude', 'Longitude',
             'Start Time', 'End Time', 'Duration (min)', 'Promoters Count', 'Total Students',
             'Boost Sachets', 'Giveaways', 'Sessions Completed', 'Teacher Count',
+
+            # Session 1 data + images
             'Session 1 Enabled', 'Session 1 Students', 'Session 1 Winner', 'Session 1 Winner Class',
+            'Session 1 Start Selfie URL', 'Session 1 End Selfie URL', 'Session 1 Winner Photo URL',
+            'Session 1 Distribution Photo URL',
+
+            # Session 2 data + images
             'Session 2 Enabled', 'Session 2 Students', 'Session 2 Winner', 'Session 2 Winner Class',
+            'Session 2 Start Selfie URL', 'Session 2 End Selfie URL', 'Session 2 Winner Photo URL',
+            'Session 2 Distribution Photo URL',
+
+            # Session 3 data + images
             'Session 3 Enabled', 'Session 3 Students', 'Session 3 Winner', 'Session 3 Winner Class',
+            'Session 3 Start Selfie URL', 'Session 3 End Selfie URL', 'Session 3 Winner Photo URL',
+            'Session 3 Distribution Photo URL',
+
+            # Main audit images
             'Auditor Remarks', 'Status', 'Start Image URL', 'End Image URL', 'Audit Sheet URL'
         ]
 
@@ -722,11 +738,14 @@ def export_audits_excel():
         base_url = request.url_root.rstrip('/')
 
         for audit in audits:
+            # Format the audit to generate image URLs
+            formatted_audit = format_audit_response(dict(audit), base_url)
+
             # Calculate total students
-            total_students = audit.get('total_students', 0)
+            total_students = formatted_audit.get('total_students', 0)
             if not total_students:
                 # Fallback calculation
-                sessions = audit.get('sessions', {})
+                sessions = formatted_audit.get('sessions', {})
                 if isinstance(sessions, dict):
                     total_students = sum(
                         int(session.get('studentsCount', 0) or 0)
@@ -734,63 +753,77 @@ def export_audits_excel():
                         if session.get('enabled', False)
                     )
 
-            # Get session data
-            sessions = audit.get('sessions', {})
+            # Get session data with image URLs
+            sessions = formatted_audit.get('sessions', {})
             session1 = sessions.get('session1', {})
             session2 = sessions.get('session2', {})
             session3 = sessions.get('session3', {})
 
-            # Get main image URLs
-            start_url = create_image_url(base_url, audit.get('start_image_file_id'))
-            end_url = create_image_url(base_url, audit.get('end_image_file_id'))
-            sheet_url = create_image_url(base_url, audit.get('audit_sheet_image_file_id'))
-
             # Extract location coordinates
-            location = audit.get('location', {})
+            location = formatted_audit.get('location', {})
             latitude = location.get('latitude', '') if isinstance(location, dict) else ''
             longitude = location.get('longitude', '') if isinstance(location, dict) else ''
 
             data_row = [
-                str(audit.get('_id', '')),
-                audit.get('audit_date', ''),
-                audit.get('user_email', ''),
-                audit.get('school_name', ''),
-                audit.get('city', ''),
+                str(formatted_audit.get('_id', '')),
+                formatted_audit.get('audit_date', ''),
+                formatted_audit.get('user_email', ''),
+                formatted_audit.get('school_name', ''),
+                formatted_audit.get('city', ''),
                 latitude,
                 longitude,
-                audit.get('start_timestamp', '').split(',')[1].strip() if audit.get('start_timestamp') else '',
-                audit.get('end_timestamp', '').split(',')[1].strip() if audit.get('end_timestamp') else '',
-                audit.get('session_duration_minutes', 0),
-                audit.get('promoters_count', 0),
+                formatted_audit.get('start_timestamp', '').split(',')[1].strip() if formatted_audit.get(
+                    'start_timestamp') else '',
+                formatted_audit.get('end_timestamp', '').split(',')[1].strip() if formatted_audit.get(
+                    'end_timestamp') else '',
+                formatted_audit.get('session_duration_minutes', 0),
+                formatted_audit.get('promoters_count', 0),
                 total_students,
-                audit.get('boost_sachets_given', 0),
-                audit.get('giveaways_given', ''),
-                audit.get('sessions_completed', 0),
-                audit.get('teacher_count', 0),
+                formatted_audit.get('boost_sachets_given', 0),
+                formatted_audit.get('giveaways_given', ''),
+                formatted_audit.get('sessions_completed', 0),
+                formatted_audit.get('teacher_count', 0),
+
+                # Session 1 data + ALL image URLs
                 'Yes' if session1.get('enabled', False) else 'No',
                 session1.get('studentsCount', '') if session1.get('enabled', False) else '',
                 session1.get('winnerName', '') if session1.get('enabled', False) else '',
                 session1.get('winnerClass', '') if session1.get('enabled', False) else '',
+                session1.get('startSelfieUrl', ''),  # NEW: Session 1 start selfie
+                session1.get('endSelfieUrl', ''),  # NEW: Session 1 end selfie
+                session1.get('winnerPhotoUrl', ''),  # NEW: Session 1 winner photo
+                session1.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 1 distribution photo
+
+                # Session 2 data + ALL image URLs
                 'Yes' if session2.get('enabled', False) else 'No',
                 session2.get('studentsCount', '') if session2.get('enabled', False) else '',
                 session2.get('winnerName', '') if session2.get('enabled', False) else '',
                 session2.get('winnerClass', '') if session2.get('enabled', False) else '',
+                session2.get('startSelfieUrl', ''),  # NEW: Session 2 start selfie
+                session2.get('endSelfieUrl', ''),  # NEW: Session 2 end selfie
+                session2.get('winnerPhotoUrl', ''),  # NEW: Session 2 winner photo
+                session2.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 2 distribution photo
+
+                # Session 3 data + ALL image URLs
                 'Yes' if session3.get('enabled', False) else 'No',
                 session3.get('studentsCount', '') if session3.get('enabled', False) else '',
                 session3.get('winnerName', '') if session3.get('enabled', False) else '',
                 session3.get('winnerClass', '') if session3.get('enabled', False) else '',
-                audit.get('auditor_remarks', ''),
-                audit.get('status', ''),
-                start_url,
-                end_url,
-                sheet_url
+                session3.get('startSelfieUrl', ''),  # NEW: Session 3 start selfie
+                session3.get('endSelfieUrl', ''),  # NEW: Session 3 end selfie
+                session3.get('winnerPhotoUrl', ''),  # NEW: Session 3 winner photo
+                session3.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 3 distribution photo
+
+                # Main audit data
+                formatted_audit.get('auditor_remarks', ''),
+                formatted_audit.get('status', ''),
+                formatted_audit.get('start_image_url', ''),  # Main start image
+                formatted_audit.get('end_image_url', ''),  # Main end image
+                formatted_audit.get('audit_sheet_image_url', '')  # Audit sheet image
             ]
 
             for col, value in enumerate(data_row):
-                if col == 1:  # Date column
-                    worksheet.write(row, col, value, cell_format)
-                else:
-                    worksheet.write(row, col, value, cell_format)
+                worksheet.write(row, col, value, cell_format)
             row += 1
 
         # Add summary row
@@ -828,7 +861,7 @@ def export_audits_excel():
         worksheet.write(summary_row + 1, 4, 'Completed Audits:', cell_format)
         worksheet.write(summary_row + 1, 5, completed_audits, cell_format)
 
-        # Set column widths
+        # Set column widths - UPDATED for new columns
         worksheet.set_column(0, 0, 25)  # Audit ID
         worksheet.set_column(1, 1, 15)  # Date
         worksheet.set_column(2, 2, 25)  # Email
@@ -837,16 +870,16 @@ def export_audits_excel():
         worksheet.set_column(5, 6, 12)  # Lat/Long
         worksheet.set_column(7, 8, 15)  # Times
         worksheet.set_column(9, 16, 12)  # Basic numbers
-        worksheet.set_column(17, 28, 15)  # Session data
-        worksheet.set_column(29, 29, 40)  # Remarks
-        worksheet.set_column(30, 30, 12)  # Status
-        worksheet.set_column(31, 33, 50)  # Image URLs
+        worksheet.set_column(17, 40, 15)  # Session data and image URLs
+        worksheet.set_column(41, 41, 40)  # Remarks
+        worksheet.set_column(42, 42, 12)  # Status
+        worksheet.set_column(43, 45, 50)  # Main image URLs
 
         workbook.close()
         output.seek(0)
 
         controller_suffix = f"_{controller_email.split('@')[0]}" if controller_email else ""
-        filename = f"school_audits_controller{controller_suffix}_{start_date}_{end_date}.xlsx"
+        filename = f"school_audits_complete{controller_suffix}_{start_date}_{end_date}.xlsx"
 
         return send_file(
             output,
