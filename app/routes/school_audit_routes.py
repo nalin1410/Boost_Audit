@@ -20,7 +20,7 @@ from app.utils.gcs_upload import (
 )
 
 # Import the function to update assignment status
-from app.routes.school_assignment import update_school_audit_status_in_assignment
+from app.routes.school_assignment_routes import update_school_audit_status_in_assignment
 
 school_audit_bp = Blueprint('school_audit', __name__)
 IST_TZ = pytz.timezone('Asia/Kolkata')
