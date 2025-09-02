@@ -653,11 +653,9 @@ def get_audit_summary(user_email):
         return jsonify({'error': 'Internal server error'}), 500
 
 
-# Replace your export_audits_excel function with this enhanced version
-
 @school_audit_bp.route('/export-audits', methods=['POST'])
 def export_audits_excel():
-    """Export audit data to Excel with ALL image URLs included"""
+    """Export audit data to Excel with ALL image URLs included + enhanced debugging"""
     try:
         data = request.get_json()
         start_date = data.get('start_date')
@@ -667,6 +665,9 @@ def export_audits_excel():
 
         if not start_date or not end_date:
             return jsonify({"error": "Start date and end date are required"}), 400
+
+        print(
+            f"🔍 Export request - Start: {start_date}, End: {end_date}, Controller: {controller_email}, User: {user_email}")
 
         # Get controller users if specified
         controller_user_emails = []
@@ -685,29 +686,178 @@ def export_audits_excel():
                 if controller_users_response.status_code == 200:
                     controller_data = controller_users_response.json()
                     controller_user_emails = controller_data.get('users', [])
+                    print(f"📧 Controller users found: {len(controller_user_emails)} - {controller_user_emails}")
                 else:
+                    print(f"❌ Controller API error: {controller_users_response.status_code}")
                     return jsonify({"error": "Failed to fetch users under controller"}), 400
 
             except Exception as e:
                 print(f"❌ Error fetching controller users: {str(e)}")
                 return jsonify({"error": "Failed to fetch controller users"}), 500
 
-        # Build query
+        # Build query with enhanced debugging
         query = {}
+
+        # User filtering logic
         if controller_email and controller_user_emails:
             if user_email and user_email in controller_user_emails:
                 query['user_email'] = user_email
+                print(f"🎯 Filtering by specific user: {user_email}")
             else:
                 query['user_email'] = {'$in': controller_user_emails}
+                print(f"🎯 Filtering by controller users: {len(controller_user_emails)} emails")
         elif user_email:
             query['user_email'] = user_email
+            print(f"🎯 Filtering by user email: {user_email}")
+        else:
+            print("🌐 No user filtering - searching all users")
 
-        query['audit_date'] = {'$gte': start_date, '$lte': end_date}
+        # Date filtering - FIXED to handle "Sept" vs "Sep" mismatch
+        try:
+            from datetime import datetime
 
+            # Handle different input date formats
+            date_formats = [
+                '%Y-%m-%d',  # 2025-09-02
+                '%d %b %Y',  # 02 Sep 2025
+                '%d %B %Y',  # 02 September 2025
+                '%Y-%m-%d %H:%M:%S'  # 2025-09-02 12:00:00
+            ]
+
+            start_dt = None
+            end_dt = None
+
+            # Parse start date
+            for fmt in date_formats:
+                try:
+                    start_dt = datetime.strptime(start_date, fmt)
+                    break
+                except ValueError:
+                    continue
+
+            # Handle ALL month abbreviation mismatches
+            month_corrections = {
+                'Sept': 'Sep',  # September
+                'Novem': 'Nov',  # November
+                'Decem': 'Dec',  # December
+                'Febr': 'Feb',  # February
+                'Januar': 'Jan',  # January (rare)
+                'Octob': 'Oct',  # October (rare)
+            }
+
+            # Fix start date abbreviations
+            if not start_dt:
+                corrected_start = start_date
+                for wrong, correct in month_corrections.items():
+                    if wrong in corrected_start:
+                        corrected_start = corrected_start.replace(wrong, correct)
+                        print(f"🔧 Fixed start date format: {start_date} -> {corrected_start}")
+                        break
+
+                try:
+                    start_dt = datetime.strptime(corrected_start, '%d %b %Y')
+                except ValueError:
+                    pass
+
+            # Parse end date
+            for fmt in date_formats:
+                try:
+                    end_dt = datetime.strptime(end_date, fmt)
+                    break
+                except ValueError:
+                    continue
+
+            # Fix end date abbreviations
+            if not end_dt:
+                corrected_end = end_date
+                for wrong, correct in month_corrections.items():
+                    if wrong in corrected_end:
+                        corrected_end = corrected_end.replace(wrong, correct)
+                        print(f"🔧 Fixed end date format: {end_date} -> {corrected_end}")
+                        break
+
+                try:
+                    end_dt = datetime.strptime(corrected_end, '%d %b %Y')
+                except ValueError:
+                    pass
+
+            if start_dt and end_dt:
+                # Format dates to match your database format "02 Sep 2025"
+                formatted_start = start_dt.strftime('%d %b %Y')
+                formatted_end = end_dt.strftime('%d %b %Y')
+
+                query['audit_date'] = {'$gte': formatted_start, '$lte': formatted_end}
+                print(f"📅 Date filter (formatted): {formatted_start} to {formatted_end}")
+            else:
+                # Direct string matching with Sept->Sep conversion
+                corrected_start = start_date.replace('Sept', 'Sep')
+                corrected_end = end_date.replace('Sept', 'Sep')
+
+                query['audit_date'] = {'$gte': corrected_start, '$lte': corrected_end}
+                print(f"📅 Date filter (corrected): {corrected_start} to {corrected_end}")
+
+        except Exception as date_error:
+            print(f"⚠️ Date parsing error: {date_error}")
+            # Last resort: direct replacement
+            corrected_start = start_date.replace('Sept', 'Sep')
+            corrected_end = end_date.replace('Sept', 'Sep')
+            query['audit_date'] = {'$gte': corrected_start, '$lte': corrected_end}
+
+        print(f"🔍 Final MongoDB query: {query}")
+
+        # Count total documents in collection for debugging
+        total_docs = mongo.db.school_audits.count_documents({})
+        print(f"📊 Total documents in collection: {total_docs}")
+
+        # Check if any documents match date range using timestamps
+        if start_dt and end_dt:
+            start_timestamp_ms = int(start_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+            end_timestamp_ms = int(
+                (end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)).timestamp() * 1000)
+
+            date_only_query = {
+                'created_at': {
+                    '$gte': {'$date': {'$numberLong': str(start_timestamp_ms)}},
+                    '$lte': {'$date': {'$numberLong': str(end_timestamp_ms)}}
+                }
+            }
+        else:
+            # Fallback to string-based date query
+            corrected_start = start_date.replace('Sept', 'Sep').replace('Novem', 'Nov').replace('Decem', 'Dec')
+            corrected_end = end_date.replace('Sept', 'Sep').replace('Novem', 'Nov').replace('Decem', 'Dec')
+            date_only_query = {'audit_date': {'$gte': corrected_start, '$lte': corrected_end}}
+
+        date_matches = mongo.db.school_audits.count_documents(date_only_query)
+        print(f"📊 Documents matching date range (timestamp): {date_matches}")
+
+        # Execute main query
         audits = list(mongo.db.school_audits.find(query).sort('created_at', -1))
+        print(f"📊 Audits found with full query: {len(audits)}")
 
         if len(audits) == 0:
-            return jsonify({"error": "No audit data found for the selected criteria"}), 404
+            # Enhanced debugging: check what data exists
+            sample_docs = list(mongo.db.school_audits.find({}).limit(3))
+            print("🔍 Sample documents for debugging:")
+            for i, doc in enumerate(sample_docs):
+                print(f"  Doc {i + 1}: audit_date='{doc.get('audit_date')}', user_email='{doc.get('user_email')}'")
+
+            # Try broader search to see if there's any data at all
+            all_audit_dates = mongo.db.school_audits.distinct('audit_date')
+            all_user_emails = mongo.db.school_audits.distinct('user_email')
+
+            print(f"📅 All audit dates in DB: {all_audit_dates}")
+            print(f"👥 All user emails in DB: {all_user_emails}")
+
+            return jsonify({
+                "error": "No audit data found for the selected criteria",
+                "debug_info": {
+                    "total_docs": total_docs,
+                    "date_matches": date_matches,
+                    "query_used": query,
+                    "available_dates": all_audit_dates[:10],  # First 10 dates
+                    "available_users": all_user_emails[:10]  # First 10 users
+                }
+            }), 404
 
         # Create Excel file
         output = io.BytesIO()
@@ -726,17 +876,34 @@ def export_audits_excel():
         cell_format = workbook.add_format({
             'border': 1,
             'align': 'center',
-            'valign': 'vcenter'
+            'valign': 'vcenter',
+            'text_wrap': True  # Added text wrap for long URLs
+        })
+
+        url_format = workbook.add_format({
+            'border': 1,
+            'align': 'left',
+            'valign': 'vcenter',
+            'font_color': 'blue',
+            'underline': True,
+            'text_wrap': True
         })
 
         # Create main worksheet
         worksheet = workbook.add_worksheet("School Audits")
 
-        # ENHANCED headers with ALL image URLs
+        # ENHANCED headers with ALL image URLs - organized by category
         headers = [
+            # Basic audit info
             'Audit ID', 'Date', 'Auditor Email', 'School Name', 'City', 'Latitude', 'Longitude',
-            'Start Time', 'End Time', 'Duration (min)', 'Promoters Count', 'Total Students',
-            'Boost Sachets', 'Giveaways', 'Sessions Completed', 'Teacher Count',
+            'Start Time', 'End Time', 'Duration (min)', 'Status', 'Auditor Remarks',
+
+            # Summary data
+            'Promoters Count', 'Total Students', 'Boost Sachets', 'Giveaways',
+            'Sessions Completed', 'Teacher Count',
+
+            # Main audit images
+            'Start Image URL', 'End Image URL', 'Audit Sheet URL',
 
             # Session 1 data + images
             'Session 1 Enabled', 'Session 1 Students', 'Session 1 Winner', 'Session 1 Winner Class',
@@ -751,114 +918,145 @@ def export_audits_excel():
             # Session 3 data + images
             'Session 3 Enabled', 'Session 3 Students', 'Session 3 Winner', 'Session 3 Winner Class',
             'Session 3 Start Selfie URL', 'Session 3 End Selfie URL', 'Session 3 Winner Photo URL',
-            'Session 3 Distribution Photo URL',
-
-            # Main audit images
-            'Auditor Remarks', 'Status', 'Start Image URL', 'End Image URL', 'Audit Sheet URL'
+            'Session 3 Distribution Photo URL'
         ]
 
-        # Write headers
+        # Write headers with color coding
         for col, header in enumerate(headers):
-            worksheet.write(0, col, header, header_format)
+            if 'URL' in header:
+                # Use different color for URL columns
+                url_header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#1f4e79',
+                    'font_color': 'white',
+                    'border': 1,
+                    'align': 'center',
+                    'valign': 'vcenter'
+                })
+                worksheet.write(0, col, header, url_header_format)
+            else:
+                worksheet.write(0, col, header, header_format)
 
         # Write data
         row = 1
         base_url = request.url_root.rstrip('/')
 
         for audit in audits:
-            # Format the audit to generate image URLs
-            formatted_audit = format_audit_response(dict(audit), base_url)
+            try:
+                # Format the audit to generate image URLs
+                formatted_audit = format_audit_response(dict(audit), base_url)
 
-            # Calculate total students
-            total_students = formatted_audit.get('total_students', 0)
-            if not total_students:
-                # Fallback calculation
+                # Calculate total students with fallback
+                total_students = formatted_audit.get('total_students', 0)
+                if not total_students:
+                    sessions = formatted_audit.get('sessions', {})
+                    if isinstance(sessions, dict):
+                        total_students = sum(
+                            int(session.get('studentsCount', 0) or 0)
+                            for session in sessions.values()
+                            if session.get('enabled', False)
+                        )
+
+                # Get session data with image URLs
                 sessions = formatted_audit.get('sessions', {})
-                if isinstance(sessions, dict):
-                    total_students = sum(
-                        int(session.get('studentsCount', 0) or 0)
-                        for session in sessions.values()
-                        if session.get('enabled', False)
-                    )
+                session1 = sessions.get('session1', {})
+                session2 = sessions.get('session2', {})
+                session3 = sessions.get('session3', {})
 
-            # Get session data with image URLs
-            sessions = formatted_audit.get('sessions', {})
-            session1 = sessions.get('session1', {})
-            session2 = sessions.get('session2', {})
-            session3 = sessions.get('session3', {})
+                # Extract location coordinates safely
+                location = formatted_audit.get('location', {})
+                latitude = location.get('latitude', '') if isinstance(location, dict) else ''
+                longitude = location.get('longitude', '') if isinstance(location, dict) else ''
 
-            # Extract location coordinates
-            location = formatted_audit.get('location', {})
-            latitude = location.get('latitude', '') if isinstance(location, dict) else ''
-            longitude = location.get('longitude', '') if isinstance(location, dict) else ''
+                # Helper function to extract time from timestamp
+                def extract_time(timestamp):
+                    if not timestamp:
+                        return ''
+                    try:
+                        return timestamp.split(',')[1].strip() if ',' in timestamp else timestamp
+                    except:
+                        return timestamp
 
-            data_row = [
-                str(formatted_audit.get('_id', '')),
-                formatted_audit.get('audit_date', ''),
-                formatted_audit.get('user_email', ''),
-                formatted_audit.get('school_name', ''),
-                formatted_audit.get('city', ''),
-                latitude,
-                longitude,
-                formatted_audit.get('start_timestamp', '').split(',')[1].strip() if formatted_audit.get(
-                    'start_timestamp') else '',
-                formatted_audit.get('end_timestamp', '').split(',')[1].strip() if formatted_audit.get(
-                    'end_timestamp') else '',
-                formatted_audit.get('session_duration_minutes', 0),
-                formatted_audit.get('promoters_count', 0),
-                total_students,
-                formatted_audit.get('boost_sachets_given', 0),
-                formatted_audit.get('giveaways_given', ''),
-                formatted_audit.get('sessions_completed', 0),
-                formatted_audit.get('teacher_count', 0),
+                # Build data row - REORGANIZED for better readability
+                data_row = [
+                    # Basic audit info
+                    str(formatted_audit.get('_id', '')),
+                    formatted_audit.get('audit_date', ''),
+                    formatted_audit.get('user_email', ''),
+                    formatted_audit.get('school_name', ''),
+                    formatted_audit.get('city', ''),
+                    latitude,
+                    longitude,
+                    extract_time(formatted_audit.get('start_timestamp', '')),
+                    extract_time(formatted_audit.get('end_timestamp', '')),
+                    formatted_audit.get('session_duration_minutes', 0),
+                    formatted_audit.get('status', ''),
+                    formatted_audit.get('auditor_remarks', ''),
 
-                # Session 1 data + ALL image URLs
-                'Yes' if session1.get('enabled', False) else 'No',
-                session1.get('studentsCount', '') if session1.get('enabled', False) else '',
-                session1.get('winnerName', '') if session1.get('enabled', False) else '',
-                session1.get('winnerClass', '') if session1.get('enabled', False) else '',
-                session1.get('startSelfieUrl', ''),  # NEW: Session 1 start selfie
-                session1.get('endSelfieUrl', ''),  # NEW: Session 1 end selfie
-                session1.get('winnerPhotoUrl', ''),  # NEW: Session 1 winner photo
-                session1.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 1 distribution photo
+                    # Summary data
+                    formatted_audit.get('promoters_count', 0),
+                    total_students,
+                    formatted_audit.get('boost_sachets_given', 0),
+                    formatted_audit.get('giveaways_given', ''),
+                    formatted_audit.get('sessions_completed', 0),
+                    formatted_audit.get('teacher_count', 0),
 
-                # Session 2 data + ALL image URLs
-                'Yes' if session2.get('enabled', False) else 'No',
-                session2.get('studentsCount', '') if session2.get('enabled', False) else '',
-                session2.get('winnerName', '') if session2.get('enabled', False) else '',
-                session2.get('winnerClass', '') if session2.get('enabled', False) else '',
-                session2.get('startSelfieUrl', ''),  # NEW: Session 2 start selfie
-                session2.get('endSelfieUrl', ''),  # NEW: Session 2 end selfie
-                session2.get('winnerPhotoUrl', ''),  # NEW: Session 2 winner photo
-                session2.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 2 distribution photo
+                    # Main audit images
+                    formatted_audit.get('start_image_url', ''),
+                    formatted_audit.get('end_image_url', ''),
+                    formatted_audit.get('audit_sheet_image_url', ''),
 
-                # Session 3 data + ALL image URLs
-                'Yes' if session3.get('enabled', False) else 'No',
-                session3.get('studentsCount', '') if session3.get('enabled', False) else '',
-                session3.get('winnerName', '') if session3.get('enabled', False) else '',
-                session3.get('winnerClass', '') if session3.get('enabled', False) else '',
-                session3.get('startSelfieUrl', ''),  # NEW: Session 3 start selfie
-                session3.get('endSelfieUrl', ''),  # NEW: Session 3 end selfie
-                session3.get('winnerPhotoUrl', ''),  # NEW: Session 3 winner photo
-                session3.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 3 distribution photo
+                    # Session 1 data + ALL image URLs
+                    'Yes' if session1.get('enabled', False) else 'No',
+                    session1.get('studentsCount', '') if session1.get('enabled', False) else '',
+                    session1.get('winnerName', '') if session1.get('enabled', False) else '',
+                    session1.get('winnerClass', '') if session1.get('enabled', False) else '',
+                    session1.get('startSelfieUrl', ''),
+                    session1.get('endSelfieUrl', ''),
+                    session1.get('winnerPhotoUrl', ''),
+                    session1.get('sachetDistributionPhotoUrl', ''),
 
-                # Main audit data
-                formatted_audit.get('auditor_remarks', ''),
-                formatted_audit.get('status', ''),
-                formatted_audit.get('start_image_url', ''),  # Main start image
-                formatted_audit.get('end_image_url', ''),  # Main end image
-                formatted_audit.get('audit_sheet_image_url', '')  # Audit sheet image
-            ]
+                    # Session 2 data + ALL image URLs
+                    'Yes' if session2.get('enabled', False) else 'No',
+                    session2.get('studentsCount', '') if session2.get('enabled', False) else '',
+                    session2.get('winnerName', '') if session2.get('enabled', False) else '',
+                    session2.get('winnerClass', '') if session2.get('enabled', False) else '',
+                    session2.get('startSelfieUrl', ''),
+                    session2.get('endSelfieUrl', ''),
+                    session2.get('winnerPhotoUrl', ''),
+                    session2.get('sachetDistributionPhotoUrl', ''),
 
-            for col, value in enumerate(data_row):
-                worksheet.write(row, col, value, cell_format)
-            row += 1
+                    # Session 3 data + ALL image URLs
+                    'Yes' if session3.get('enabled', False) else 'No',
+                    session3.get('studentsCount', '') if session3.get('enabled', False) else '',
+                    session3.get('winnerName', '') if session3.get('enabled', False) else '',
+                    session3.get('winnerClass', '') if session3.get('enabled', False) else '',
+                    session3.get('startSelfieUrl', ''),
+                    session3.get('endSelfieUrl', ''),
+                    session3.get('winnerPhotoUrl', ''),
+                    session3.get('sachetDistributionPhotoUrl', '')
+                ]
 
-        # Add summary row
-        summary_row = row + 1
+                # Write row with appropriate formatting
+                for col, value in enumerate(data_row):
+                    if col >= 18 and col <= 20:  # Main image URL columns
+                        worksheet.write(row, col, value, url_format if value else cell_format)
+                    elif 'URL' in headers[col]:  # Session image URL columns
+                        worksheet.write(row, col, value, url_format if value else cell_format)
+                    else:
+                        worksheet.write(row, col, value, cell_format)
+
+                row += 1
+
+            except Exception as audit_error:
+                print(f"❌ Error processing audit {audit.get('_id')}: {audit_error}")
+                continue
+
+        # Add summary section
+        summary_row = row + 2
         worksheet.write(summary_row, 0, 'SUMMARY:', header_format)
         worksheet.write(summary_row, 1, f'Total Audits: {len(audits)}', header_format)
-        worksheet.write(summary_row, 2, f'Controller: {controller_email}', header_format)
+        worksheet.write(summary_row, 2, f'Controller: {controller_email or "All"}', header_format)
         worksheet.write(summary_row, 3, f'Date Range: {start_date} to {end_date}', header_format)
 
         # Calculate totals
@@ -882,6 +1080,7 @@ def export_audits_excel():
 
             total_sachets_all += audit.get('boost_sachets_given', 0)
 
+        # Write summary statistics
         worksheet.write(summary_row + 1, 0, 'Total Students Reached:', cell_format)
         worksheet.write(summary_row + 1, 1, total_students_all, cell_format)
         worksheet.write(summary_row + 1, 2, 'Total Sachets Distributed:', cell_format)
@@ -889,7 +1088,7 @@ def export_audits_excel():
         worksheet.write(summary_row + 1, 4, 'Completed Audits:', cell_format)
         worksheet.write(summary_row + 1, 5, completed_audits, cell_format)
 
-        # Set column widths - UPDATED for new columns
+        # Set column widths - OPTIMIZED for readability
         worksheet.set_column(0, 0, 25)  # Audit ID
         worksheet.set_column(1, 1, 15)  # Date
         worksheet.set_column(2, 2, 25)  # Email
@@ -897,17 +1096,29 @@ def export_audits_excel():
         worksheet.set_column(4, 4, 20)  # City
         worksheet.set_column(5, 6, 12)  # Lat/Long
         worksheet.set_column(7, 8, 15)  # Times
-        worksheet.set_column(9, 16, 12)  # Basic numbers
-        worksheet.set_column(17, 40, 15)  # Session data and image URLs
-        worksheet.set_column(41, 41, 40)  # Remarks
-        worksheet.set_column(42, 42, 12)  # Status
-        worksheet.set_column(43, 45, 50)  # Main image URLs
+        worksheet.set_column(9, 11, 12)  # Duration, Status, Remarks
+        worksheet.set_column(11, 11, 40)  # Remarks (wider)
+        worksheet.set_column(12, 17, 12)  # Summary numbers
+        worksheet.set_column(18, 20, 60)  # Main image URLs (wider)
+        worksheet.set_column(21, 44, 15)  # Session data
+
+        # Make image URL columns extra wide and wrap text
+        url_columns = [18, 19, 20, 25, 26, 27, 28, 33, 34, 35, 36, 41, 42, 43, 44]
+        for col in url_columns:
+            worksheet.set_column(col, col, 60)
+
+        # Freeze the header row
+        worksheet.freeze_panes(1, 0)
 
         workbook.close()
         output.seek(0)
 
+        # Generate filename
         controller_suffix = f"_{controller_email.split('@')[0]}" if controller_email else ""
-        filename = f"school_audits_complete{controller_suffix}_{start_date}_{end_date}.xlsx"
+        user_suffix = f"_{user_email.split('@')[0]}" if user_email and not controller_email else ""
+        filename = f"school_audits_complete{controller_suffix}{user_suffix}_{start_date}_{end_date}.xlsx"
+
+        print(f"✅ Excel file generated successfully: {filename}")
 
         return send_file(
             output,
@@ -921,6 +1132,55 @@ def export_audits_excel():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"Failed to generate Excel report: {str(e)}"}), 500
+
+
+# ADDITIONAL HELPER FUNCTION: Debug endpoint to check data
+@school_audit_bp.route('/debug-audit-data', methods=['GET'])
+def debug_audit_data():
+    """Debug endpoint to check what audit data exists in the database"""
+    try:
+        # Get basic stats
+        total_docs = mongo.db.school_audits.count_documents({})
+
+        # Get sample documents
+        sample_docs = list(mongo.db.school_audits.find({}, {
+            'audit_date': 1,
+            'user_email': 1,
+            'school_name': 1,
+            'created_at': 1
+        }).sort('created_at', -1).limit(10))
+
+        # Get distinct values
+        all_dates = mongo.db.school_audits.distinct('audit_date')
+        all_users = mongo.db.school_audits.distinct('user_email')
+
+        # Format dates for better readability
+        formatted_docs = []
+        for doc in sample_docs:
+            formatted_docs.append({
+                'id': str(doc['_id']),
+                'audit_date': doc.get('audit_date'),
+                'user_email': doc.get('user_email'),
+                'school_name': doc.get('school_name'),
+                'created_at': doc.get('created_at')
+            })
+
+        return jsonify({
+            'total_documents': total_docs,
+            'sample_documents': formatted_docs,
+            'all_audit_dates': sorted(all_dates) if all_dates else [],
+            'all_user_emails': sorted(all_users) if all_users else [],
+            'date_range_available': {
+                'earliest': min(all_dates) if all_dates else None,
+                'latest': max(all_dates) if all_dates else None
+            }
+        })
+
+    except Exception as e:
+        print(f"❌ Debug error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 
 
 @school_audit_bp.route('/controller-audit-summary/<controller_email>', methods=['GET'])
