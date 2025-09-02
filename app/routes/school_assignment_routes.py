@@ -8,51 +8,83 @@ school_assignment_bp = Blueprint('school_assignment', __name__)
 IST_TZ = pytz.timezone('Asia/Kolkata')
 
 
-def update_school_audit_status_in_assignment(user_email, school_name, city, audit_status, audit_id=None, assignment_date=None):
+def update_school_audit_status_in_assignment(user_email, school_name, city, audit_status, audit_id=None,
+                                             assignment_date=None):
     """
-    Update the audit status for a specific school in the assignment
+    Update the audit status for a specific school in the assignment - ENHANCED with better date handling
     """
     try:
-        # If assignment_date not provided, use today's date
-        if not assignment_date:
-            assignment_date = datetime.now().date().strftime('%Y-%m-%d')
-        
-        # Find the assignment for this trainer, school, and date
-        assignment = mongo.db.school_assignments.find_one({
-            'trainer_email': user_email,
-            'assignment_date': assignment_date,
-            'status': 'active'
-        })
-        
+        # If assignment_date not provided, check for assignments in the last 7 days
+        search_dates = []
+        if assignment_date:
+            search_dates.append(assignment_date)
+        else:
+            # Search for assignments in the last 7 days
+            for i in range(7):
+                date_to_check = (datetime.now().date() - timedelta(days=i)).strftime('%Y-%m-%d')
+                search_dates.append(date_to_check)
+
+        assignment = None
+
+        # Try to find assignment for any of the search dates
+        for search_date in search_dates:
+            assignment = mongo.db.school_assignments.find_one({
+                'trainer_email': user_email,
+                'assignment_date': search_date,
+                'status': 'active'
+            })
+            if assignment:
+                print(f"✅ Found assignment for {user_email} on {search_date}")
+                break
+
         if not assignment:
-            print(f"⚠️ No assignment found for {user_email} on {assignment_date}")
+            print(f"⚠️ No assignment found for {user_email} in dates: {search_dates}")
+            # Also try without date filter as fallback
+            assignment = mongo.db.school_assignments.find_one({
+                'trainer_email': user_email,
+                'status': 'active'
+            }, sort=[('assignment_date', -1)])  # Get most recent assignment
+
+            if assignment:
+                print(f"✅ Found fallback assignment for {user_email} on {assignment['assignment_date']}")
+
+        if not assignment:
+            print(f"⚠️ No assignment found for {user_email} at all")
             return False
-        
+
         # Find the school in the assignment
         schools = assignment.get('schools', [])
         school_found = False
-        
+
         for school in schools:
-            if (school.get('school_name', '').lower() == school_name.lower() and 
-                school.get('city', '').lower() == city.lower()):
-                
+            # Use case-insensitive comparison and strip whitespace
+            if (school.get('school_name', '').strip().lower() == school_name.strip().lower() and
+                    school.get('city', '').strip().lower() == city.strip().lower()):
+
+                print(f"✅ Found matching school: {school_name} in {city}")
+
                 # Update the school's audit status
+                old_status = school.get('audit_status', 'pending')
                 school['audit_status'] = audit_status
                 school['audit_id'] = audit_id
                 school['last_updated'] = datetime.now(IST_TZ).isoformat()
-                
+
                 if audit_status == 'in_progress':
                     school['audit_started_at'] = datetime.now(IST_TZ).isoformat()
                 elif audit_status == 'completed':
                     school['audit_completed_at'] = datetime.now(IST_TZ).isoformat()
-                
+
+                print(f"📝 Status change: {old_status} -> {audit_status}")
                 school_found = True
                 break
-        
+
         if not school_found:
             print(f"⚠️ School {school_name} in {city} not found in assignment")
+            print(f"Available schools in assignment:")
+            for i, school in enumerate(schools):
+                print(f"  {i + 1}. '{school.get('school_name')}' in '{school.get('city')}'")
             return False
-        
+
         # Update the assignment in database
         result = mongo.db.school_assignments.update_one(
             {'_id': assignment['_id']},
@@ -63,16 +95,18 @@ def update_school_audit_status_in_assignment(user_email, school_name, city, audi
                 }
             }
         )
-        
+
         if result.modified_count > 0:
             print(f"✅ Updated audit status for {school_name} to {audit_status}")
             return True
         else:
             print(f"❌ Failed to update audit status for {school_name}")
             return False
-            
+
     except Exception as e:
         print(f"❌ Error updating school audit status: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -108,7 +142,7 @@ def assign_schools():
         for school in schools:
             if not school.get('school_name') or not school.get('city'):
                 return jsonify({'error': 'Each school must have school_name and city'}), 400
-            
+
             # Initialize audit status fields for new assignments
             school['audit_status'] = 'pending'
             school['audit_id'] = None
@@ -216,6 +250,7 @@ def check_existing_assignment(trainer_email, assignment_date):
         print(f"❌ Error checking assignment: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @school_assignment_bp.route('/trainer-assignments/<trainer_email>', methods=['GET'])
 def get_trainer_assignments(trainer_email):
     """Get school assignments for a specific trainer"""
@@ -258,9 +293,10 @@ def get_trainer_assignments(trainer_email):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+# Simplified version of the today-assignments endpoint
 @school_assignment_bp.route('/today-assignments/<trainer_email>', methods=['GET'])
-def get_today_assignments(trainer_email):
-    """Get today's school assignments with accurate audit status for each school"""
+def get_today_assignments_simplified(trainer_email):
+    """Get today's school assignments - simplified since audit status is now in DB"""
     try:
         assignment_date = request.args.get('date', datetime.now().date().strftime('%Y-%m-%d'))
 
@@ -289,13 +325,13 @@ def get_today_assignments(trainer_email):
                 }
             }), 200
 
-        all_schools = assignment.get('schools', [])
+        schools = assignment.get('schools', [])
 
-        # Remove duplicates from assignment using school_name + city
+        # Remove duplicates based on school_name + city
         unique_schools = []
         seen_identifiers = set()
 
-        for school in all_schools:
+        for school in schools:
             identifier = f"{school['school_name']}|{school['city']}".lower()
             if identifier not in seen_identifiers:
                 seen_identifiers.add(identifier)
@@ -303,171 +339,115 @@ def get_today_assignments(trainer_email):
             else:
                 print(f"⚠️ Duplicate school removed: {school['school_name']} - {school['city']}")
 
-        # IMPROVED: Query ALL audits for these schools by this trainer
-        # Get all audits for this trainer and these specific schools
-        audit_query = {
-            'auditor_email': trainer_email,
-            '$or': [
-                {
-                    'school_name': school['school_name'],
-                    'city': school['city']
-                }
-                for school in unique_schools
-            ]
-        }
-
-        # Sort by creation time to get the most recent audits first
-        audits = list(mongo.db.school_audits.find(audit_query).sort('created_at', -1))
-
-        # IMPROVED: Create more sophisticated audit lookup
-        audit_lookup = {}
-
-        for audit in audits:
-            identifier = f"{audit['school_name']}|{audit['city']}".lower()
-
-            # If we already have an audit status for this school, check priorities
-            if identifier in audit_lookup:
-                existing_status = audit_lookup[identifier]['status']
-                current_status = audit['status']
-
-                # Priority order: in_progress > completed (today) > completed (other days) > pending
-                # If current audit is in_progress, it takes priority
-                if current_status == 'in_progress':
-                    audit_lookup[identifier] = {
-                        'status': 'in_progress',
-                        'audit_id': str(audit['_id']),
-                        'start_timestamp': audit.get('start_timestamp'),
-                        'completion_timestamp': None,
-                        'audit_data': audit,
-                        'audit_date': audit.get('audit_date')
-                    }
-                # If current audit is completed and we don't have in_progress, check date
-                elif current_status == 'completed' and existing_status != 'in_progress':
-                    # For completed audits, prefer today's completion
-                    audit_date = audit.get('audit_date')
-                    if audit_date == assignment_date:
-                        audit_lookup[identifier] = {
-                            'status': 'completed',
-                            'audit_id': str(audit['_id']),
-                            'start_timestamp': audit.get('start_timestamp'),
-                            'completion_timestamp': audit.get('completion_timestamp'),
-                            'audit_data': audit,
-                            'audit_date': audit_date
-                        }
-                    elif existing_status != 'completed':
-                        # Only set if we don't already have a completed status
-                        audit_lookup[identifier] = {
-                            'status': 'completed',
-                            'audit_id': str(audit['_id']),
-                            'start_timestamp': audit.get('start_timestamp'),
-                            'completion_timestamp': audit.get('completion_timestamp'),
-                            'audit_data': audit,
-                            'audit_date': audit_date
-                        }
-            else:
-                # First audit for this school
-                if audit['status'] == 'in_progress':
-                    audit_lookup[identifier] = {
-                        'status': 'in_progress',
-                        'audit_id': str(audit['_id']),
-                        'start_timestamp': audit.get('start_timestamp'),
-                        'completion_timestamp': None,
-                        'audit_data': audit,
-                        'audit_date': audit.get('audit_date')
-                    }
-                elif audit['status'] == 'completed':
-                    audit_lookup[identifier] = {
-                        'status': 'completed',
-                        'audit_id': str(audit['_id']),
-                        'start_timestamp': audit.get('start_timestamp'),
-                        'completion_timestamp': audit.get('completion_timestamp'),
-                        'audit_data': audit,
-                        'audit_date': audit.get('audit_date')
-                    }
-
-        # IMPROVED: Enhanced school status assignment
-        enhanced_schools = []
+        # Calculate summary from stored audit_status
         summary_counts = {'completed': 0, 'in_progress': 0, 'pending': 0}
 
         for school in unique_schools:
-            identifier = f"{school['school_name']}|{school['city']}".lower()
+            status = school.get('audit_status', 'pending')
+            if status in summary_counts:
+                summary_counts[status] += 1
 
-            if identifier in audit_lookup:
-                audit_info = audit_lookup[identifier]
-                audit_status = audit_info['status']
+        # Filter out completed schools for mobile response (they shouldn't show on main screen)
+        active_schools = [
+            school for school in unique_schools
+            if school.get('audit_status', 'pending') != 'completed'
+        ]
 
-                # Additional validation for incomplete audits
-                if audit_status == 'in_progress':
-                    # Check if the in-progress audit has any substantial data
-                    audit_data = audit_info.get('audit_data', {})
-                    if not audit_data.get('sections') and not audit_data.get('responses'):
-                        # If no sections or responses, treat as pending
-                        audit_status = 'pending'
-                        audit_info = None
-
-                summary_counts[audit_status] += 1
-
-                if audit_info:
-                    enhanced_school = {
-                        **school,
-                        'audit_status': audit_status,
-                        'audit_id': audit_info['audit_id'],
-                        'start_timestamp': audit_info['start_timestamp'],
-                        'completion_timestamp': audit_info['completion_timestamp'],
-                        'audit_date': audit_info.get('audit_date')
-                    }
-
-                    # Include audit data for in-progress audits
-                    if audit_status == 'in_progress':
-                        enhanced_school['current_audit_data'] = audit_info['audit_data']
-                else:
-                    # Treated as pending due to incomplete data
-                    enhanced_school = {
-                        **school,
-                        'audit_status': 'pending',
-                        'audit_id': None,
-                        'start_timestamp': None,
-                        'completion_timestamp': None
-                    }
-            else:
-                # No audit found - school is pending
-                audit_status = 'pending'
-                summary_counts['pending'] += 1
-
-                enhanced_school = {
-                    **school,
-                    'audit_status': audit_status,
-                    'audit_id': None,
-                    'start_timestamp': None,
-                    'completion_timestamp': None
-                }
-
-            enhanced_schools.append(enhanced_school)
-
-        # Convert ObjectId to string
+        # Convert ObjectId to string and format timestamps
         assignment['_id'] = str(assignment['_id'])
         if 'created_at' in assignment:
             assignment['created_at'] = assignment['created_at'].isoformat()
 
+        # Format timestamps in schools
+        for school in active_schools:
+            if school.get('audit_started_at'):
+                try:
+                    # If it's already a datetime object, convert to ISO string
+                    if isinstance(school['audit_started_at'], datetime):
+                        school['start_timestamp'] = school['audit_started_at'].strftime('%H:%M')
+                    else:
+                        # If it's already a string, parse and reformat
+                        dt = datetime.fromisoformat(school['audit_started_at'].replace('Z', '+00:00'))
+                        school['start_timestamp'] = dt.strftime('%H:%M')
+                except:
+                    school['start_timestamp'] = school.get('audit_started_at', '')
+
+            if school.get('audit_completed_at'):
+                try:
+                    if isinstance(school['audit_completed_at'], datetime):
+                        school['completion_timestamp'] = school['audit_completed_at'].strftime('%H:%M')
+                    else:
+                        dt = datetime.fromisoformat(school['audit_completed_at'].replace('Z', '+00:00'))
+                        school['completion_timestamp'] = dt.strftime('%H:%M')
+                except:
+                    school['completion_timestamp'] = school.get('audit_completed_at', '')
+
         return jsonify({
             'assignment': assignment,
-            'schools': enhanced_schools,
+            'schools': active_schools,  # Only pending and in_progress schools
             'assignment_date': assignment_date,
             'summary': {
-                'total_assigned': len(unique_schools),
+                'total_assigned': len(unique_schools),  # Total includes completed
                 'completed': summary_counts['completed'],
                 'in_progress': summary_counts['in_progress'],
                 'pending': summary_counts['pending']
             },
-            'duplicates_removed': len(all_schools) - len(unique_schools),
-            'debug_info': {
-                'total_audits_found': len(audits),
-                'unique_school_identifiers': len(audit_lookup)
-            }
+            'duplicates_removed': len(schools) - len(unique_schools)
         }), 200
 
     except Exception as e:
         print(f"❌ Error fetching today's assignments: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+# Optional: Separate endpoint to get completed schools if needed
+@school_assignment_bp.route('/completed-assignments/<trainer_email>', methods=['GET'])
+def get_completed_assignments(trainer_email):
+    """Get completed school assignments for viewing history"""
+    try:
+        assignment_date = request.args.get('date', datetime.now().date().strftime('%Y-%m-%d'))
+
+        assignment = mongo.db.school_assignments.find_one({
+            'trainer_email': trainer_email,
+            'assignment_date': assignment_date,
+            'status': 'active'
+        })
+
+        if not assignment:
+            return jsonify({
+                'message': 'No assignments found for this date',
+                'schools': [],
+                'assignment_date': assignment_date
+            }), 200
+
+        schools = assignment.get('schools', [])
+
+        # Only return completed schools
+        completed_schools = [
+            school for school in schools
+            if school.get('audit_status') == 'completed'
+        ]
+
+        # Format timestamps
+        for school in completed_schools:
+            if school.get('audit_completed_at'):
+                try:
+                    if isinstance(school['audit_completed_at'], datetime):
+                        school['completion_timestamp'] = school['audit_completed_at'].strftime('%H:%M')
+                    else:
+                        dt = datetime.fromisoformat(school['audit_completed_at'].replace('Z', '+00:00'))
+                        school['completion_timestamp'] = dt.strftime('%H:%M')
+                except:
+                    school['completion_timestamp'] = school.get('audit_completed_at', '')
+
+        return jsonify({
+            'schools': completed_schools,
+            'assignment_date': assignment_date,
+            'total_completed': len(completed_schools)
+        }), 200
+
+    except Exception as e:
+        print(f"❌ Error fetching completed assignments: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
 
@@ -503,17 +483,17 @@ def get_today_assignments_with_audit_status(trainer_email):
             }), 200
 
         schools = assignment.get('schools', [])
-        
+
         # Initialize audit status for schools that don't have it
         summary_counts = {'completed': 0, 'in_progress': 0, 'pending': 0}
-        
+
         for school in schools:
             # Set default status if not present
             if 'audit_status' not in school:
                 school['audit_status'] = 'pending'
                 school['audit_id'] = None
                 school['last_updated'] = None
-            
+
             status = school.get('audit_status', 'pending')
             summary_counts[status] = summary_counts.get(status, 0) + 1
 
@@ -614,6 +594,7 @@ def get_controller_assignments(controller_email):
         print(f"❌ Error fetching controller assignments: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @school_assignment_bp.route('/delete-assignment/<assignment_id>', methods=['DELETE'])
 def delete_assignment(assignment_id):
     """Delete a school assignment"""
@@ -631,6 +612,7 @@ def delete_assignment(assignment_id):
     except Exception as e:
         print(f"❌ Error deleting assignment: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+
 
 @school_assignment_bp.route('/bulk-assign', methods=['POST'])
 def bulk_assign_schools():
@@ -715,6 +697,7 @@ def bulk_assign_schools():
         print(f"❌ Error in bulk assignment: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @school_assignment_bp.route('/update-assignment/<assignment_id>', methods=['PUT'])
 def update_assignment(assignment_id):
     """Update an existing school assignment with date restrictions"""
@@ -733,7 +716,7 @@ def update_assignment(assignment_id):
         for school in schools:
             if not school.get('school_name') or not school.get('city'):
                 return jsonify({'error': 'Each school must have school_name and city'}), 400
-            
+
             # Initialize audit status if not present
             if 'audit_status' not in school:
                 school['audit_status'] = 'pending'
@@ -800,29 +783,29 @@ def sync_audit_status_from_audits():
     try:
         data = request.get_json() or {}
         date_range = data.get('date_range', 7)  # Default to last 7 days
-        
+
         # Get recent assignments
         start_date = (datetime.now() - timedelta(days=date_range)).strftime('%Y-%m-%d')
         assignments = mongo.db.school_assignments.find({
             'assignment_date': {'$gte': start_date},
             'status': 'active'
         })
-        
+
         synced_count = 0
-        
+
         for assignment in assignments:
             schools = assignment.get('schools', [])
             assignment_updated = False
-            
+
             for school in schools:
                 school_name = school.get('school_name')
                 city = school.get('city')
                 trainer_email = assignment.get('trainer_email')
                 assignment_date = assignment.get('assignment_date')
-                
+
                 if not school_name or not city:
                     continue
-                
+
                 # Find the most recent audit for this school
                 audit = mongo.db.school_audits.find_one({
                     'user_email': trainer_email,
@@ -830,22 +813,22 @@ def sync_audit_status_from_audits():
                     'city': city,
                     'assignment_date': assignment_date
                 }, sort=[('created_at', -1)])
-                
+
                 if audit:
                     # Update school with audit status
                     old_status = school.get('audit_status', 'pending')
                     new_status = audit['status']
-                    
+
                     if old_status != new_status:
                         school['audit_status'] = new_status
                         school['audit_id'] = str(audit['_id'])
                         school['last_updated'] = datetime.now(IST_TZ).isoformat()
-                        
+
                         if new_status == 'in_progress':
                             school['audit_started_at'] = audit['created_at'].isoformat()
                         elif new_status == 'completed':
                             school['audit_completed_at'] = audit.get('completed_at', audit['created_at']).isoformat()
-                        
+
                         assignment_updated = True
                 else:
                     # No audit found - ensure status is pending
@@ -854,7 +837,7 @@ def sync_audit_status_from_audits():
                         school['audit_id'] = None
                         school['last_updated'] = datetime.now(IST_TZ).isoformat()
                         assignment_updated = True
-            
+
             # Update assignment if any schools were modified
             if assignment_updated:
                 mongo.db.school_assignments.update_one(
@@ -867,13 +850,72 @@ def sync_audit_status_from_audits():
                     }
                 )
                 synced_count += 1
-        
+
         return jsonify({
             'message': f'Audit status sync completed. Updated {synced_count} assignments.',
             'synced_assignments': synced_count,
             'date_range_days': date_range
         }), 200
-        
+
     except Exception as e:
         print(f"❌ Error syncing audit status: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@school_assignment_bp.route('/debug-assignment-match', methods=['POST'])
+def debug_assignment_match():
+    """Debug endpoint to check assignment matching"""
+    try:
+        data = request.get_json()
+        user_email = data.get('user_email')
+        school_name = data.get('school_name')
+        city = data.get('city')
+
+        # Find all assignments for this user
+        assignments = list(mongo.db.school_assignments.find({
+            'trainer_email': user_email,
+            'status': 'active'
+        }).sort('assignment_date', -1))
+
+        debug_info = {
+            'user_email': user_email,
+            'search_school': school_name,
+            'search_city': city,
+            'total_assignments': len(assignments),
+            'assignments': []
+        }
+
+        for assignment in assignments:
+            schools_in_assignment = []
+            matching_schools = []
+
+            for school in assignment.get('schools', []):
+                school_info = {
+                    'school_name': school.get('school_name'),
+                    'city': school.get('city'),
+                    'audit_status': school.get('audit_status', 'pending')
+                }
+                schools_in_assignment.append(school_info)
+
+                # Check if this school matches
+                if (school.get('school_name', '').strip().lower() == school_name.strip().lower() and
+                        school.get('city', '').strip().lower() == city.strip().lower()):
+                    matching_schools.append(school_info)
+
+            assignment_info = {
+                'assignment_id': str(assignment['_id']),
+                'assignment_date': assignment['assignment_date'],
+                'created_at': assignment['created_at'].isoformat() if 'created_at' in assignment else None,
+                'total_schools': len(schools_in_assignment),
+                'schools': schools_in_assignment,
+                'matching_schools': matching_schools,
+                'has_match': len(matching_schools) > 0
+            }
+
+            debug_info['assignments'].append(assignment_info)
+
+        return jsonify(debug_info), 200
+
+    except Exception as e:
+        print(f"❌ Error in debug endpoint: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
