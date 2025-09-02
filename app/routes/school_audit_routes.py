@@ -18,10 +18,7 @@ from app.utils.gcs_upload import (
     get_onedrive_file_info,
     convert_sharepoint_urls_to_file_ids
 )
-
-# Import the function to update assignment status
 from app.routes.school_assignment_routes import update_school_audit_status_in_assignment
-
 school_audit_bp = Blueprint('school_audit', __name__)
 IST_TZ = pytz.timezone('Asia/Kolkata')
 
@@ -227,10 +224,9 @@ def format_audit_response(audit, base_url):
 
     return audit
 
-
 @school_audit_bp.route('/start-audit', methods=['POST'])
 def start_audit():
-    """Start school audit session - ENHANCED with assignment status tracking"""
+    """Start school audit session"""
     try:
         data = request.get_json()
 
@@ -263,7 +259,6 @@ def start_audit():
             return jsonify({'error': 'Invalid timestamp format'}), 400
 
         ist_display_str = localized_dt.strftime('%d %b %Y, %I:%M %p IST')
-        assignment_date = localized_dt.strftime('%Y-%m-%d')
 
         # Upload start image to OneDrive
         start_filename = generate_unique_filename(data['user_email'], 'audit_start', 'jpg')
@@ -297,7 +292,6 @@ def start_audit():
         # Create audit record
         audit_record = {
             "user_email": data['user_email'],
-            "auditor_email": data['user_email'],  # For compatibility with existing queries
             "school_name": data['school_name'],
             "city": data['city'],
             "location": {
@@ -306,7 +300,6 @@ def start_audit():
             },
             "start_timestamp": ist_display_str,
             "audit_date": today_date_str,
-            "assignment_date": assignment_date,  # NEW: Link to assignment date
             "start_image_file_id": start_file_id,
             "promoters_count": int(data['promoters_count']),
             "boost_sachets_given": int(data.get('boost_sachets_given', 0)),
@@ -329,15 +322,18 @@ def start_audit():
         result = mongo.db.school_audits.insert_one(audit_record)
         audit_id = str(result.inserted_id)
 
-        # NEW: Update assignment with audit status
+        # UPDATE ASSIGNMENT STATUS - Mark school as "in_progress"
         assignment_update_success = update_school_audit_status_in_assignment(
             user_email=data['user_email'],
             school_name=data['school_name'],
             city=data['city'],
             audit_status='in_progress',
             audit_id=audit_id,
-            assignment_date=assignment_date
+            assignment_date=localized_dt.strftime('%Y-%m-%d')  # Pass the assignment date
         )
+
+        if not assignment_update_success:
+            print(f"⚠️ Warning: Could not update assignment status for {data['school_name']} in {data['city']}")
 
         return jsonify({
             'message': 'School audit started successfully',
@@ -346,7 +342,7 @@ def start_audit():
             'start_time': ist_display_str,
             'total_students': total_students,
             'sessions_enabled': len(processed_sessions),
-            'assignment_updated': assignment_update_success  # NEW: Confirm assignment was updated
+            'assignment_updated': assignment_update_success
         }), 201
 
     except Exception as e:
@@ -358,7 +354,7 @@ def start_audit():
 
 @school_audit_bp.route('/end-audit', methods=['POST'])
 def end_audit():
-    """End school audit session - ENHANCED with assignment status tracking"""
+    """End school audit session"""
     try:
         data = request.get_json()
 
@@ -394,7 +390,6 @@ def end_audit():
             return jsonify({'error': 'Invalid timestamp format'}), 400
 
         ist_display_str = localized_dt.strftime('%d %b %Y, %I:%M %p IST')
-        assignment_date = localized_dt.strftime('%Y-%m-%d')
 
         # Upload end image to OneDrive
         end_filename = generate_unique_filename(audit['user_email'], 'audit_end', 'jpg')
@@ -426,8 +421,7 @@ def end_audit():
             "auditor_remarks": data['auditor_remarks'],
             "session_duration_minutes": duration_minutes,
             "status": "completed",
-            "completed_at": localized_dt,
-            "completion_timestamp": ist_display_str  # For compatibility
+            "completed_at": localized_dt
         }
 
         result = mongo.db.school_audits.update_one(
@@ -438,15 +432,18 @@ def end_audit():
         if result.modified_count == 0:
             return jsonify({'error': 'Failed to update audit record'}), 500
 
-        # NEW: Update assignment with completed status
+        # UPDATE ASSIGNMENT STATUS - Mark school as "completed"
         assignment_update_success = update_school_audit_status_in_assignment(
             user_email=audit['user_email'],
             school_name=audit['school_name'],
             city=audit['city'],
             audit_status='completed',
             audit_id=data['audit_id'],
-            assignment_date=audit.get('assignment_date', assignment_date)
+            assignment_date=localized_dt.strftime('%Y-%m-%d')  # Pass the assignment date
         )
+
+        if not assignment_update_success:
+            print(f"⚠️ Warning: Could not update assignment status for {audit['school_name']} in {audit['city']}")
 
         return jsonify({
             'message': 'School audit completed successfully',
@@ -454,7 +451,7 @@ def end_audit():
             'school_name': audit['school_name'],
             'duration_minutes': duration_minutes,
             'end_time': ist_display_str,
-            'assignment_updated': assignment_update_success  # NEW: Confirm assignment update
+            'assignment_updated': assignment_update_success
         }), 200
 
     except Exception as e:
@@ -656,6 +653,8 @@ def get_audit_summary(user_email):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+# Replace your export_audits_excel function with this enhanced version
+
 @school_audit_bp.route('/export-audits', methods=['POST'])
 def export_audits_excel():
     """Export audit data to Excel with ALL image URLs included"""
@@ -818,37 +817,37 @@ def export_audits_excel():
                 session1.get('studentsCount', '') if session1.get('enabled', False) else '',
                 session1.get('winnerName', '') if session1.get('enabled', False) else '',
                 session1.get('winnerClass', '') if session1.get('enabled', False) else '',
-                session1.get('startSelfieUrl', ''),
-                session1.get('endSelfieUrl', ''),
-                session1.get('winnerPhotoUrl', ''),
-                session1.get('sachetDistributionPhotoUrl', ''),
+                session1.get('startSelfieUrl', ''),  # NEW: Session 1 start selfie
+                session1.get('endSelfieUrl', ''),  # NEW: Session 1 end selfie
+                session1.get('winnerPhotoUrl', ''),  # NEW: Session 1 winner photo
+                session1.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 1 distribution photo
 
                 # Session 2 data + ALL image URLs
                 'Yes' if session2.get('enabled', False) else 'No',
                 session2.get('studentsCount', '') if session2.get('enabled', False) else '',
                 session2.get('winnerName', '') if session2.get('enabled', False) else '',
                 session2.get('winnerClass', '') if session2.get('enabled', False) else '',
-                session2.get('startSelfieUrl', ''),
-                session2.get('endSelfieUrl', ''),
-                session2.get('winnerPhotoUrl', ''),
-                session2.get('sachetDistributionPhotoUrl', ''),
+                session2.get('startSelfieUrl', ''),  # NEW: Session 2 start selfie
+                session2.get('endSelfieUrl', ''),  # NEW: Session 2 end selfie
+                session2.get('winnerPhotoUrl', ''),  # NEW: Session 2 winner photo
+                session2.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 2 distribution photo
 
                 # Session 3 data + ALL image URLs
                 'Yes' if session3.get('enabled', False) else 'No',
                 session3.get('studentsCount', '') if session3.get('enabled', False) else '',
                 session3.get('winnerName', '') if session3.get('enabled', False) else '',
                 session3.get('winnerClass', '') if session3.get('enabled', False) else '',
-                session3.get('startSelfieUrl', ''),
-                session3.get('endSelfieUrl', ''),
-                session3.get('winnerPhotoUrl', ''),
-                session3.get('sachetDistributionPhotoUrl', ''),
+                session3.get('startSelfieUrl', ''),  # NEW: Session 3 start selfie
+                session3.get('endSelfieUrl', ''),  # NEW: Session 3 end selfie
+                session3.get('winnerPhotoUrl', ''),  # NEW: Session 3 winner photo
+                session3.get('sachetDistributionPhotoUrl', ''),  # NEW: Session 3 distribution photo
 
                 # Main audit data
                 formatted_audit.get('auditor_remarks', ''),
                 formatted_audit.get('status', ''),
-                formatted_audit.get('start_image_url', ''),
-                formatted_audit.get('end_image_url', ''),
-                formatted_audit.get('audit_sheet_image_url', '')
+                formatted_audit.get('start_image_url', ''),  # Main start image
+                formatted_audit.get('end_image_url', ''),  # Main end image
+                formatted_audit.get('audit_sheet_image_url', '')  # Audit sheet image
             ]
 
             for col, value in enumerate(data_row):
@@ -890,7 +889,7 @@ def export_audits_excel():
         worksheet.write(summary_row + 1, 4, 'Completed Audits:', cell_format)
         worksheet.write(summary_row + 1, 5, completed_audits, cell_format)
 
-        # Set column widths
+        # Set column widths - UPDATED for new columns
         worksheet.set_column(0, 0, 25)  # Audit ID
         worksheet.set_column(1, 1, 15)  # Date
         worksheet.set_column(2, 2, 25)  # Email
@@ -1205,16 +1204,6 @@ def delete_audit(audit_id):
 
         mongo.db.audit_logs.insert_one(deletion_log)
 
-        # Update assignment status back to pending
-        update_school_audit_status_in_assignment(
-            user_email=audit['user_email'],
-            school_name=audit['school_name'],
-            city=audit['city'],
-            audit_status='pending',
-            audit_id=None,
-            assignment_date=audit.get('assignment_date')
-        )
-
         # Delete the audit record
         result = mongo.db.school_audits.delete_one({"_id": ObjectId(audit_id)})
 
@@ -1225,8 +1214,7 @@ def delete_audit(audit_id):
             'message': 'Audit deleted successfully',
             'audit_id': audit_id,
             'school_name': audit['school_name'],
-            'deletion_logged': True,
-            'assignment_updated': True
+            'deletion_logged': True
         }), 200
 
     except Exception as e:
@@ -1375,10 +1363,6 @@ def migrate_legacy_audits():
                 'migration_version': '2.0'
             }
 
-            # Add auditor_email field if missing (for compatibility)
-            if 'auditor_email' not in audit and 'user_email' in audit:
-                update_fields['auditor_email'] = audit['user_email']
-
             mongo.db.school_audits.update_one(
                 {"_id": audit['_id']},
                 {"$set": update_fields}
@@ -1397,6 +1381,7 @@ def migrate_legacy_audits():
         return jsonify({'error': 'Migration failed'}), 500
 
 
+# Existing endpoints for SharePoint URL conversion and other maintenance tasks
 @school_audit_bp.route('/convert-sharepoint-urls', methods=['POST'])
 def convert_sharepoint_urls():
     """Endpoint to convert SharePoint URLs to OneDrive file IDs"""
@@ -1413,40 +1398,3 @@ def convert_sharepoint_urls():
     except Exception as e:
         print(f"❌ Error converting SharePoint URLs: {str(e)}")
         return jsonify({'error': 'Failed to convert SharePoint URLs'}), 500
-
-
-@school_audit_bp.route('/force-update-assignment-status', methods=['POST'])
-def force_update_assignment_status():
-    """Force update assignment status for a specific audit (admin endpoint)"""
-    try:
-        data = request.get_json()
-        audit_id = data.get('audit_id')
-        
-        if not audit_id:
-            return jsonify({'error': 'audit_id is required'}), 400
-
-        # Get the audit record
-        audit = mongo.db.school_audits.find_one({"_id": ObjectId(audit_id)})
-        if not audit:
-            return jsonify({'error': 'Audit record not found'}), 404
-
-        # Update assignment status based on audit status
-        assignment_update_success = update_school_audit_status_in_assignment(
-            user_email=audit['user_email'],
-            school_name=audit['school_name'],
-            city=audit['city'],
-            audit_status=audit['status'],
-            audit_id=audit_id,
-            assignment_date=audit.get('assignment_date')
-        )
-
-        return jsonify({
-            'message': 'Assignment status force updated',
-            'audit_id': audit_id,
-            'audit_status': audit['status'],
-            'assignment_updated': assignment_update_success
-        }), 200
-
-    except Exception as e:
-        print(f"❌ Error force updating assignment status: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
